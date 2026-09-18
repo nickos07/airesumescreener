@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form
 from pypdf import PdfReader
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from fastapi import HTTPException
 import google.generativeai as genai
 import os
 import io
@@ -28,21 +29,31 @@ async def screen_resume(
     resume: UploadFile = File(...),
     job_description: str = Form(...)
 ):
-    # 1. Read the raw bytes from the uploaded file (this is async — don't forget `await`)
+    
+    if len(job_description.strip()) < 20:
+        raise HTTPException(status_code=400, detail="Job description is too short or empty")
+
+    if resume.content_type != 'application/pdf':
+        raise HTTPException(status_code=400, detail="File must be in PDF format!")
+    
+    # Read the raw bytes from the uploaded file
     pdf_bytes = await resume.read()
 
-    # 2. Wrap those bytes in an in-memory buffer so pypdf can treat it like a file
+    # Wrap bytes in an in-memory buffer so pypdf can treat it like a file
     pdf_stream = io.BytesIO(pdf_bytes)
+    try:
+    # Create a PdfReader from that stream
+        reader = PdfReader(pdf_stream)
 
-    # 3. Create a PdfReader from that stream
-    reader = PdfReader(pdf_stream)
+    # Loop through reader.pages and pull text from each one, building one big string
+        extracted_text = ""
+        for page in reader.pages:
+            extracted_text += page.extract_text()
 
-    # 4. Loop through reader.pages and pull text from each one, building one big string
-    extracted_text = ""
-    for page in reader.pages:
-        extracted_text += page.extract_text()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read pdf: {str(e)}")
 
-    # 5. Build the prompt combining resume text and job description
+    # Build the prompt combining resume text and job description
     prompt = f"""
     You are an expert resume screener. Evaluate the candidate's resume against
     the job description below. Use only information present in the supplied
@@ -61,16 +72,16 @@ async def screen_resume(
     {extracted_text}
     """
 
-    # 7. Create the Gemini model instance
+    # Create model instance
     model = genai.GenerativeModel("gemini-3.5-flash")
 
-    # 8. Call generate_content, passing generation_config with response_schema
+    # Call generate_content, passing generation_config with response_schema
     response = model.generate_content(prompt, 
         generation_config=genai.GenerationConfig(
         response_mime_type="application/json",
         response_schema=ScreenerResult))
 
-    # 9. Gemini returns the JSON as a string in response.text — parse it into your Pydantic model
+    # Gemini returns the JSON as a string in response.text
     result = ScreenerResult.model_validate_json(response.text)
 
     return result
